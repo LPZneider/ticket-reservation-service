@@ -82,7 +82,7 @@ public class PurchaseHandler {
 
     private Mono<ServerResponse> processValidRequest(ReserveTicketRequest body, String messageId, String region) {
         Timer.Sample sample = Timer.start(meterRegistry);
-        return reserveTicketUseCase.reserve(body.eventId(), body.ticketIds(), body.userId())
+        return reserveTicketUseCase.reserve(body.eventId(), body.quantity(), body.userId())
                 .doOnSuccess(result -> {
                     String status = result instanceof ReservationResult.Success ? "success" : "conflict";
                     sample.stop(Timer.builder("purchases.reserve.duration").tag(TAG_STATUS, status).register(meterRegistry));
@@ -117,7 +117,7 @@ public class PurchaseHandler {
                             .messageId(messageId)
                             .errors(List.of(StatusResponseBodyApi.builder()
                                     .code(TechnicalMessage.TICKETS_UNAVAILABLE.getCode())
-                                    .message(TechnicalMessage.TICKETS_UNAVAILABLE.getMessage() + ": " + failure.unavailableTicketIds())
+                                    .message(failure.reason())
                                     .system(TechnicalMessage.TICKETS_UNAVAILABLE.getSystem())
                                     .build()))
                             .build());

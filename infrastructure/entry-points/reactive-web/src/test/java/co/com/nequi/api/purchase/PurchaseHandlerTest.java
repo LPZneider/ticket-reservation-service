@@ -10,13 +10,13 @@ import co.com.nequi.usecase.reservation.ReserveTicketUseCase;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.webflux.test.autoconfigure.WebFluxTest;
@@ -37,7 +37,7 @@ import java.time.Instant;
 import java.util.Collections;
 import java.util.List;
 
-import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
@@ -48,41 +48,30 @@ class PurchaseHandlerTest {
 
     @TestConfiguration
     static class MeterRegistryTestConfig {
-        @Bean
-        MeterRegistry meterRegistry() {
-            return new SimpleMeterRegistry();
-        }
+        @Bean MeterRegistry meterRegistry() { return new SimpleMeterRegistry(); }
     }
 
-    @Autowired
-    private WebTestClient webTestClient;
+    @Autowired private WebTestClient webTestClient;
+    @MockitoBean private CreateEventUseCase createEventUseCase;
+    @MockitoBean private ReserveTicketUseCase reserveTicketUseCase;
 
-    @MockitoBean
-    private CreateEventUseCase createEventUseCase;
-
-    @MockitoBean
-    private ReserveTicketUseCase reserveTicketUseCase;
+    private static Order pendingOrder() {
+        return Order.builder().orderId("order-1").eventId("event-1")
+                .ticketIds(List.of("order-1-1", "order-1-2")).userId("user-1")
+                .orderStatus(OrderStatus.PENDING_CONFIRMATION)
+                .createdAt(Instant.parse("2026-07-01T10:00:00Z")).build();
+    }
 
     @Test
-    void shouldReturn202WhenReservationSucceeds() {
-        Order order = Order.builder()
-                .orderId("order-1")
-                .eventId("event-1")
-                .ticketIds(List.of("t1", "t2"))
-                .userId("user-1")
-                .orderStatus(OrderStatus.PENDING_CONFIRMATION)
-                .createdAt(Instant.parse("2026-07-01T10:00:00Z"))
-                .build();
-        when(reserveTicketUseCase.reserve(anyString(), anyList(), anyString()))
-                .thenReturn(Mono.just(new ReservationResult.Success(order, true, true)));
+    void shouldReturn202WithOrderIdWhenReservationSucceeds() {
+        when(reserveTicketUseCase.reserve(anyString(), anyInt(), anyString()))
+                .thenReturn(Mono.just(new ReservationResult.Success(pendingOrder(), true, true)));
 
-        webTestClient.post()
-                .uri("/api/v1/purchases")
-                .header("messageId", "msg-1")
-                .header("region", "C001")
+        webTestClient.post().uri("/api/v1/purchases")
+                .header("messageId", "msg-1").header("region", "C001")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
-                        {"eventId":"event-1","ticketIds":["t1","t2"],"userId":"user-1"}
+                        {"eventId":"event-1","quantity":2,"userId":"user-1"}
                         """)
                 .exchange()
                 .expectStatus().isAccepted()
@@ -93,72 +82,69 @@ class PurchaseHandlerTest {
     }
 
     @Test
-    void shouldReturn202EvenWhenBothPublishesFailedAfterRetries() {
-        Order order = Order.builder()
-                .orderId("order-1")
-                .eventId("event-1")
-                .ticketIds(List.of("t1", "t2"))
-                .userId("user-1")
-                .orderStatus(OrderStatus.PENDING_CONFIRMATION)
-                .createdAt(Instant.parse("2026-07-01T10:00:00Z"))
-                .build();
-        when(reserveTicketUseCase.reserve(anyString(), anyList(), anyString()))
-                .thenReturn(Mono.just(new ReservationResult.Success(order, false, false)));
+    void shouldReturn202EvenWhenBothPublishesFailed() {
+        when(reserveTicketUseCase.reserve(anyString(), anyInt(), anyString()))
+                .thenReturn(Mono.just(new ReservationResult.Success(pendingOrder(), false, false)));
 
-        webTestClient.post()
-                .uri("/api/v1/purchases")
-                .header("messageId", "msg-1")
-                .header("region", "C001")
+        webTestClient.post().uri("/api/v1/purchases")
+                .header("messageId", "msg-1").header("region", "C001")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
-                        {"eventId":"event-1","ticketIds":["t1","t2"],"userId":"user-1"}
+                        {"eventId":"event-1","quantity":2,"userId":"user-1"}
                         """)
                 .exchange()
                 .expectStatus().isAccepted()
-                .expectBody()
-                .jsonPath("$.data.orderId").isEqualTo("order-1");
+                .expectBody().jsonPath("$.data.orderId").isEqualTo("order-1");
     }
 
     @Test
-    void shouldReturn409WhenTicketsAreUnavailable() {
-        when(reserveTicketUseCase.reserve(anyString(), anyList(), anyString()))
-                .thenReturn(Mono.just(new ReservationResult.Failure(List.of("t2"))));
+    void shouldReturn409WhenNotEnoughAvailability() {
+        when(reserveTicketUseCase.reserve(anyString(), anyInt(), anyString()))
+                .thenReturn(Mono.just(new ReservationResult.Failure("Not enough available tickets for event event-1")));
 
-        webTestClient.post()
-                .uri("/api/v1/purchases")
-                .header("messageId", "msg-1")
-                .header("region", "C001")
+        webTestClient.post().uri("/api/v1/purchases")
+                .header("messageId", "msg-1").header("region", "C001")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
-                        {"eventId":"event-1","ticketIds":["t1","t2"],"userId":"user-1"}
+                        {"eventId":"event-1","quantity":2,"userId":"user-1"}
                         """)
                 .exchange()
                 .expectStatus().isEqualTo(409)
                 .expectBody()
-                .jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("t2"));
+                .jsonPath("$.errors[0].message").value(
+                        org.hamcrest.Matchers.containsString("Not enough"));
     }
 
     @Test
     void shouldReturn400WhenHeadersAreMissing() {
-        webTestClient.post()
-                .uri("/api/v1/purchases")
+        webTestClient.post().uri("/api/v1/purchases")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
-                        {"eventId":"event-1","ticketIds":["t1","t2"],"userId":"user-1"}
+                        {"eventId":"event-1","quantity":2,"userId":"user-1"}
                         """)
                 .exchange()
                 .expectStatus().isBadRequest();
     }
 
     @Test
-    void shouldReturn400WhenTicketIdsIsEmpty() {
-        webTestClient.post()
-                .uri("/api/v1/purchases")
-                .header("messageId", "msg-1")
-                .header("region", "C001")
+    void shouldReturn400WhenQuantityIsZero() {
+        webTestClient.post().uri("/api/v1/purchases")
+                .header("messageId", "msg-1").header("region", "C001")
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue("""
-                        {"eventId":"event-1","ticketIds":[],"userId":"user-1"}
+                        {"eventId":"event-1","quantity":0,"userId":"user-1"}
+                        """)
+                .exchange()
+                .expectStatus().isBadRequest();
+    }
+
+    @Test
+    void shouldReturn400WhenEventIdMissing() {
+        webTestClient.post().uri("/api/v1/purchases")
+                .header("messageId", "msg-1").header("region", "C001")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("""
+                        {"quantity":2,"userId":"user-1"}
                         """)
                 .exchange()
                 .expectStatus().isBadRequest();
@@ -167,9 +153,7 @@ class PurchaseHandlerTest {
     @ExtendWith(MockitoExtension.class)
     static class FallbackTest {
 
-        @Mock
-        private ReserveTicketUseCase reserveTicketUseCase;
-
+        @Mock private ReserveTicketUseCase reserveTicketUseCase;
         private PurchaseHandler handler;
 
         @BeforeEach
@@ -180,30 +164,24 @@ class PurchaseHandlerTest {
         private ServerRequest buildRequest(String messageId) {
             MockServerHttpRequest.BodyBuilder builder = MockServerHttpRequest.post("/api/v1/purchases")
                     .header("region", "C001");
-            if (messageId != null) {
-                builder.header("messageId", messageId);
-            }
-            MockServerWebExchange exchange = MockServerWebExchange.from(builder.build());
-            return ServerRequest.create(exchange, Collections.emptyList());
+            if (messageId != null) builder.header("messageId", messageId);
+            return ServerRequest.create(MockServerWebExchange.from(builder.build()), Collections.emptyList());
         }
 
         @Test
         void fallbackWithGenericExceptionReturns500() {
-            ServerRequest request = buildRequest("msg-1");
-            StepVerifier.create(handler.fallback(request, new RuntimeException("boom")))
-                    .expectNextMatches(response -> response.statusCode() == HttpStatus.INTERNAL_SERVER_ERROR)
+            StepVerifier.create(handler.fallback(buildRequest("msg-1"), new RuntimeException("boom")))
+                    .expectNextMatches(r -> r.statusCode() == HttpStatus.INTERNAL_SERVER_ERROR)
                     .verifyComplete();
         }
 
         @Test
-        void fallbackWithCallNotPermittedExceptionReturns503() {
-            CircuitBreaker cb = CircuitBreakerRegistry.ofDefaults().circuitBreaker("testCb");
+        void fallbackWithCallNotPermittedReturns503() {
+            CircuitBreaker cb = CircuitBreakerRegistry.ofDefaults().circuitBreaker("cb");
             cb.transitionToOpenState();
-            CallNotPermittedException ex = CallNotPermittedException.createCallNotPermittedException(cb);
-
-            ServerRequest request = buildRequest("msg-1");
-            StepVerifier.create(handler.fallback(request, ex))
-                    .expectNextMatches(response -> response.statusCode() == HttpStatus.SERVICE_UNAVAILABLE)
+            StepVerifier.create(handler.fallback(buildRequest("msg-1"),
+                            CallNotPermittedException.createCallNotPermittedException(cb)))
+                    .expectNextMatches(r -> r.statusCode() == HttpStatus.SERVICE_UNAVAILABLE)
                     .verifyComplete();
         }
     }

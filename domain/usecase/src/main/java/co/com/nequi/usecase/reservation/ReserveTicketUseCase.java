@@ -12,7 +12,6 @@ import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 
 @RequiredArgsConstructor
@@ -23,23 +22,23 @@ public class ReserveTicketUseCase {
     private final PurchaseRequestPublisher purchaseRequestPublisher;
     private final ReservationExpiryPublisher reservationExpiryPublisher;
 
-    public Mono<ReservationResult> reserve(String eventId, List<String> ticketIds, String userId) {
+    public Mono<ReservationResult> reserve(String eventId, int quantity, String userId) {
         String orderId = UUID.randomUUID().toString();
-        return ticketRepository.reserveTickets(eventId, ticketIds, orderId)
-                .flatMap(result -> toReservationResult(result, orderId, eventId, ticketIds, userId));
+        return ticketRepository.reserveAndCreateTickets(eventId, quantity, orderId)
+                .flatMap(result -> switch (result) {
+                    case TicketReservationResult.Failure f ->
+                            Mono.just((ReservationResult) new ReservationResult.Failure(f.reason()));
+                    case TicketReservationResult.Success s ->
+                            confirmReservation(orderId, eventId, s, userId);
+                });
     }
 
-    private Mono<ReservationResult> toReservationResult(TicketReservationResult result, String orderId,
-                                                          String eventId, List<String> ticketIds, String userId) {
-        return switch (result) {
-            case TicketReservationResult.Failure failure ->
-                    Mono.just(new ReservationResult.Failure(failure.unavailableTicketIds()));
-            case TicketReservationResult.Success ignored ->
-                    confirmReservation(orderId, eventId, ticketIds, userId);
-        };
-    }
+    private Mono<ReservationResult> confirmReservation(String orderId, String eventId,
+                                                        TicketReservationResult.Success result, String userId) {
+        var ticketIds = result.reservedTickets().stream()
+                .map(t -> t.getTicketId())
+                .toList();
 
-    private Mono<ReservationResult> confirmReservation(String orderId, String eventId, List<String> ticketIds, String userId) {
         Order order = Order.builder()
                 .orderId(orderId)
                 .eventId(eventId)
@@ -50,33 +49,21 @@ public class ReserveTicketUseCase {
                 .build();
 
         return orderRepository.save(order)
-                .flatMap(savedOrder -> publishReservationMessages(savedOrder, eventId, ticketIds, userId)
-                        .map(outcome -> new ReservationResult.Success(
-                                savedOrder, outcome.purchaseRequestPublished(), outcome.reservationExpiryPublished())));
+                .flatMap(saved -> publishMessages(saved, eventId, ticketIds, userId)
+                        .map(o -> (ReservationResult) new ReservationResult.Success(
+                                saved, o.purchaseOk(), o.expiryOk())));
     }
 
-    /**
-     * Each publish already retried independently inside its own adapter; here we
-     * only record whether it ultimately succeeded. A failure on either (or both)
-     * never fails the reservation itself — the DynamoDB writes already committed,
-     * so the client still gets 202. The entry-point decides what to log based on
-     * which combination of outcomes it receives.
-     */
-    private Mono<PublishOutcome> publishReservationMessages(Order order, String eventId,
-                                                             List<String> ticketIds, String userId) {
-        Mono<Boolean> purchasePublished = purchaseRequestPublisher
+    private Mono<PublishOutcome> publishMessages(Order order, String eventId,
+                                                  java.util.List<String> ticketIds, String userId) {
+        Mono<Boolean> purchaseOk = purchaseRequestPublisher
                 .publish(order.getOrderId(), eventId, ticketIds, userId, order.getCreatedAt())
-                .thenReturn(true)
-                .onErrorReturn(false);
-        Mono<Boolean> expiryPublished = reservationExpiryPublisher
+                .thenReturn(true).onErrorReturn(false);
+        Mono<Boolean> expiryOk = reservationExpiryPublisher
                 .publish(order.getOrderId(), ticketIds)
-                .thenReturn(true)
-                .onErrorReturn(false);
-
-        return Mono.zip(purchasePublished, expiryPublished)
-                .map(tuple -> new PublishOutcome(tuple.getT1(), tuple.getT2()));
+                .thenReturn(true).onErrorReturn(false);
+        return Mono.zip(purchaseOk, expiryOk).map(t -> new PublishOutcome(t.getT1(), t.getT2()));
     }
 
-    private record PublishOutcome(boolean purchaseRequestPublished, boolean reservationExpiryPublished) {
-    }
+    private record PublishOutcome(boolean purchaseOk, boolean expiryOk) {}
 }

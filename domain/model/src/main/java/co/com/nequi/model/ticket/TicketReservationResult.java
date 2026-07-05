@@ -7,6 +7,6 @@ public sealed interface TicketReservationResult {
     record Success(List<Ticket> reservedTickets) implements TicketReservationResult {
     }
 
-    record Failure(List<String> unavailableTicketIds) implements TicketReservationResult {
+    record Failure(String reason) implements TicketReservationResult {
     }
 }
