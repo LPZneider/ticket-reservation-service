@@ -1,0 +1,43 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: "TicketReservationService"
+  devtools:
+    add-properties: false
+  profiles:
+    active: ${ENV:local}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,prometheus"
+  endpoint:
+    health:
+      probes:
+        enabled: true
+aws:
+  region: ${AWS_REGION}
+adapter:
+  dynamodb:
+    tickets-table-name: ${TICKETS_TABLE_NAME}
+    orders-table-name: ${ORDERS_TABLE_NAME}
+  sqs:
+    region: ${AWS_REGION}
+    purchase:
+      queue-url: ${PURCHASE_QUEUE_URL}
+      queue-name: ${PURCHASE_QUEUE_NAME}
+    expiry:
+      queue-url: ${EXPIRY_QUEUE_URL}
+      queue-name: ${EXPIRY_QUEUE_NAME}
+---
+spring:
+  config:
+    activate:
+      on-profile: local
+aws:
+  dynamodb:
+    endpoint: ${AWS_DYNAMODB_ENDPOINT:http://dynamodb-local:8000}
+adapter:
+  sqs:
+    endpoint: ${AWS_SQS_ENDPOINT:http://localstack:4566}

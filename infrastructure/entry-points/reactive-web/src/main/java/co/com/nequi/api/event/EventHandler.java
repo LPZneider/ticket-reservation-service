@@ -1,0 +1,151 @@
+package co.com.nequi.api.event;
+
+import co.com.nequi.api.dto.request.CreateEventRequest;
+import co.com.nequi.api.dto.response.ApiResponse;
+import co.com.nequi.api.dto.response.EventResponse;
+import co.com.nequi.api.dto.response.StatusResponseBodyApi;
+import co.com.nequi.api.util.enums.TechnicalMessage;
+import co.com.nequi.api.validator.HeaderValidator;
+import co.com.nequi.api.validator.RequestValidator;
+import co.com.nequi.model.event.Event;
+import co.com.nequi.model.exception.InvalidEventCapacityException;
+import co.com.nequi.usecase.event.CreateEventUseCase;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.server.ServerRequest;
+import org.springframework.web.reactive.function.server.ServerResponse;
+import reactor.core.publisher.Mono;
+
+import java.util.List;
+
+import static co.com.nequi.api.util.constant.HandlerConstantsApi.HEADER_MESSAGE_ID;
+import static co.com.nequi.api.util.constant.HandlerConstantsApi.HEADER_REGION;
+
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class EventHandler {
+
+    private static final String CIRCUIT_BREAKER_NAME = "createEvent";
+    private static final String FALLBACK_METHOD = "fallback";
+    private static final String TAG_STATUS = "status";
+
+    private final CreateEventUseCase createEventUseCase;
+    private final MeterRegistry meterRegistry;
+
+    @CircuitBreaker(name = CIRCUIT_BREAKER_NAME, fallbackMethod = FALLBACK_METHOD)
+    public Mono<ServerResponse> handle(ServerRequest request) {
+        String messageId = request.headers().firstHeader(HEADER_MESSAGE_ID);
+        String region = request.headers().firstHeader(HEADER_REGION);
+
+        return HeaderValidator.headers(messageId, region)
+                .filter(errors -> !errors.isEmpty())
+                .flatMap(errors -> {
+                    log.warn("[EVENTS] Header validation failed | messageId={}, errors={}", messageId, errors);
+                    return buildBadRequest(messageId, errors);
+                })
+                .switchIfEmpty(Mono.defer(() ->
+                        request.bodyToMono(CreateEventRequest.class)
+                                .flatMap(body -> RequestValidator.validate(body)
+                                        .filter(errors -> !errors.isEmpty())
+                                        .flatMap(errors -> {
+                                            log.warn("[EVENTS] Body validation failed | messageId={}, errors={}", messageId, errors);
+                                            return buildBadRequest(messageId, errors);
+                                        })
+                                        .switchIfEmpty(Mono.defer(() -> processValidRequest(body, messageId, region))))))
+                .onErrorResume(InvalidEventCapacityException.class, ex -> {
+                    log.warn("[EVENTS] Invalid capacity | messageId={}, message={}", messageId, ex.getMessage());
+                    return ServerResponse.status(HttpStatus.BAD_REQUEST)
+                            .bodyValue(ApiResponse.builder()
+                                    .code(HttpStatus.BAD_REQUEST.value())
+                                    .description(HttpStatus.BAD_REQUEST.getReasonPhrase())
+                                    .messageId(messageId)
+                                    .errors(List.of(StatusResponseBodyApi.builder()
+                                            .code(TechnicalMessage.EVENT_INVALID_CAPACITY.getCode())
+                                            .message(ex.getMessage())
+                                            .system(TechnicalMessage.EVENT_INVALID_CAPACITY.getSystem())
+                                            .build()))
+                                    .build());
+                })
+                .onErrorResume(ex -> {
+                    log.error("[EVENTS] Unexpected error | messageId={}, message={}", messageId, ex.getMessage(), ex);
+                    return ServerResponse.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                            .bodyValue(errorResponse(messageId, HttpStatus.INTERNAL_SERVER_ERROR, TechnicalMessage.ERROR_INTERNAL_SERVER));
+                });
+    }
+
+    public Mono<ServerResponse> fallback(ServerRequest request, Exception exception) {
+        String messageId = request.headers().firstHeader(HEADER_MESSAGE_ID);
+        log.error("[EVENTS] Fallback triggered | messageId={}, exception={}, message={}",
+                messageId, exception.getClass().getSimpleName(), exception.getMessage(), exception);
+        return ServerResponse.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .bodyValue(errorResponse(messageId, HttpStatus.INTERNAL_SERVER_ERROR, TechnicalMessage.ERROR_INTERNAL_SERVER));
+    }
+
+    public Mono<ServerResponse> fallback(ServerRequest request, CallNotPermittedException exception) {
+        String messageId = request.headers().firstHeader(HEADER_MESSAGE_ID);
+        log.error("[EVENTS] Circuit breaker OPEN | messageId={}, message={}", messageId, exception.getMessage());
+        return ServerResponse.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .bodyValue(errorResponse(messageId, HttpStatus.SERVICE_UNAVAILABLE, TechnicalMessage.ERROR_SERVICE_UNAVAILABLE));
+    }
+
+    private Mono<ServerResponse> processValidRequest(CreateEventRequest body, String messageId, String region) {
+        Timer.Sample sample = Timer.start(meterRegistry);
+        return createEventUseCase.create(body.name(), body.date(), body.venue(), body.totalCapacity())
+                .doOnSuccess(event -> {
+                    sample.stop(Timer.builder("events.create.duration").tag(TAG_STATUS, "success").register(meterRegistry));
+                    meterRegistry.counter("events.created", TAG_STATUS, "success").increment();
+                    log.info("[EVENTS] Event created | eventId={}, messageId={}", event.getEventId(), messageId);
+                })
+                .doOnError(e -> {
+                    sample.stop(Timer.builder("events.create.duration").tag(TAG_STATUS, "error").register(meterRegistry));
+                    meterRegistry.counter("events.created", TAG_STATUS, "error").increment();
+                })
+                .flatMap(event -> ServerResponse.status(HttpStatus.CREATED).bodyValue(
+                        ApiResponse.builder()
+                                .code(HttpStatus.CREATED.value())
+                                .description(HttpStatus.CREATED.getReasonPhrase())
+                                .messageId(messageId)
+                                .region(region)
+                                .data(toResponse(event))
+                                .build()));
+    }
+
+    private Mono<ServerResponse> buildBadRequest(String messageId, List<StatusResponseBodyApi> errors) {
+        return ServerResponse.badRequest().bodyValue(
+                ApiResponse.builder()
+                        .code(HttpStatus.BAD_REQUEST.value())
+                        .description(HttpStatus.BAD_REQUEST.getReasonPhrase())
+                        .messageId(messageId)
+                        .errors(errors)
+                        .build());
+    }
+
+    private static ApiResponse errorResponse(String messageId, HttpStatus status, TechnicalMessage tm) {
+        return ApiResponse.builder()
+                .code(status.value())
+                .description(status.getReasonPhrase())
+                .messageId(messageId)
+                .errors(List.of(StatusResponseBodyApi.builder()
+                        .code(tm.getCode())
+                        .message(tm.getMessage())
+                        .system(tm.getSystem())
+                        .build()))
+                .build();
+    }
+
+    private static EventResponse toResponse(Event event) {
+        return new EventResponse(
+                event.getEventId(),
+                event.getName(),
+                event.getDate(),
+                event.getVenue(),
+                event.getTotalCapacity());
+    }
+}
