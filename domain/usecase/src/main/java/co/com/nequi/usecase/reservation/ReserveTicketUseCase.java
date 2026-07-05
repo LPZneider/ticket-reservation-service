@@ -10,7 +10,6 @@ import co.com.nequi.model.ticket.TicketReservationResult;
 import co.com.nequi.model.ticket.gateways.TicketRepository;
 import lombok.RequiredArgsConstructor;
 import reactor.core.publisher.Mono;
-import reactor.util.function.Tuple2;
 
 import java.time.Instant;
 import java.util.List;
@@ -27,12 +26,17 @@ public class ReserveTicketUseCase {
     public Mono<ReservationResult> reserve(String eventId, List<String> ticketIds, String userId) {
         String orderId = UUID.randomUUID().toString();
         return ticketRepository.reserveTickets(eventId, ticketIds, orderId)
-                .flatMap(result -> switch (result) {
-                    case TicketReservationResult.Failure failure ->
-                            Mono.<ReservationResult>just(new ReservationResult.Failure(failure.unavailableTicketIds()));
-                    case TicketReservationResult.Success ignored ->
-                            confirmReservation(orderId, eventId, ticketIds, userId);
-                });
+                .flatMap(result -> toReservationResult(result, orderId, eventId, ticketIds, userId));
+    }
+
+    private Mono<ReservationResult> toReservationResult(TicketReservationResult result, String orderId,
+                                                          String eventId, List<String> ticketIds, String userId) {
+        return switch (result) {
+            case TicketReservationResult.Failure failure ->
+                    Mono.just(new ReservationResult.Failure(failure.unavailableTicketIds()));
+            case TicketReservationResult.Success ignored ->
+                    confirmReservation(orderId, eventId, ticketIds, userId);
+        };
     }
 
     private Mono<ReservationResult> confirmReservation(String orderId, String eventId, List<String> ticketIds, String userId) {
@@ -47,8 +51,8 @@ public class ReserveTicketUseCase {
 
         return orderRepository.save(order)
                 .flatMap(savedOrder -> publishReservationMessages(savedOrder, eventId, ticketIds, userId)
-                        .map(publishOutcome -> (ReservationResult) new ReservationResult.Success(
-                                savedOrder, publishOutcome.getT1(), publishOutcome.getT2())));
+                        .map(outcome -> new ReservationResult.Success(
+                                savedOrder, outcome.purchaseRequestPublished(), outcome.reservationExpiryPublished())));
     }
 
     /**
@@ -58,8 +62,8 @@ public class ReserveTicketUseCase {
      * so the client still gets 202. The entry-point decides what to log based on
      * which combination of outcomes it receives.
      */
-    private Mono<Tuple2<Boolean, Boolean>> publishReservationMessages(Order order, String eventId,
-                                                                       List<String> ticketIds, String userId) {
+    private Mono<PublishOutcome> publishReservationMessages(Order order, String eventId,
+                                                             List<String> ticketIds, String userId) {
         Mono<Boolean> purchasePublished = purchaseRequestPublisher
                 .publish(order.getOrderId(), eventId, ticketIds, userId, order.getCreatedAt())
                 .thenReturn(true)
@@ -69,6 +73,10 @@ public class ReserveTicketUseCase {
                 .thenReturn(true)
                 .onErrorReturn(false);
 
-        return Mono.zip(purchasePublished, expiryPublished);
+        return Mono.zip(purchasePublished, expiryPublished)
+                .map(tuple -> new PublishOutcome(tuple.getT1(), tuple.getT2()));
+    }
+
+    private record PublishOutcome(boolean purchaseRequestPublished, boolean reservationExpiryPublished) {
     }
 }
