@@ -1,8 +1,8 @@
 services:
   ticket-reservation-service:
     build:
-      context: ./applications/app-service/build/libs
-      dockerfile: ../../../deployment/Dockerfile
+      context: .
+      dockerfile: deployment/Dockerfile
     ports:
       - "8080:8080"
     environment:
@@ -37,6 +37,9 @@ services:
     depends_on:
       - dynamodb-local
     entrypoint: [ "/bin/sh", "/init/init-dynamodb.sh" ]
+    environment:
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
     volumes:
       - ./deployment/local/init-dynamodb.sh:/init/init-dynamodb.sh:ro
     networks:

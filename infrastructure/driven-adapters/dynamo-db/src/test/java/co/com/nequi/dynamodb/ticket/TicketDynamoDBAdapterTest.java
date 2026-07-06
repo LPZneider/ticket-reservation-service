@@ -1,6 +1,7 @@
 package co.com.nequi.dynamodb.ticket;
 
 import co.com.nequi.model.ticket.TicketReservationResult;
+import co.com.nequi.model.ticket.TicketStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -9,12 +10,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import reactor.test.StepVerifier;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
-import software.amazon.awssdk.services.dynamodb.model.CancellationReason;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsResponse;
 import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
 
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -30,9 +29,9 @@ class TicketDynamoDBAdapterTest {
 
     private TicketDynamoDBAdapter adapter;
 
-    private static final String EVENT_ID = "event-1";
-    private static final List<String> TICKET_IDS = List.of("t1", "t2");
-    private static final String ORDER_ID = "order-1";
+    private static final String EVENT_ID  = "event-1";
+    private static final String ORDER_ID  = "order-1";
+    private static final int    QUANTITY  = 3;
 
     @BeforeEach
     void setUp() {
@@ -40,41 +39,98 @@ class TicketDynamoDBAdapterTest {
     }
 
     @Test
-    void shouldReturnSuccessWithReservedTicketsWhenTransactionSucceeds() {
+    void shouldReturnSuccessWithNReservedTicketsWhenTransactionSucceeds() {
         when(client.transactWriteItems(any(TransactWriteItemsRequest.class)))
                 .thenReturn(CompletableFuture.completedFuture(TransactWriteItemsResponse.builder().build()));
 
-        StepVerifier.create(adapter.reserveTickets(EVENT_ID, TICKET_IDS, ORDER_ID))
+        StepVerifier.create(adapter.reserveAndCreateTickets(EVENT_ID, QUANTITY, ORDER_ID))
                 .assertNext(result -> {
                     assertThat(result).isInstanceOf(TicketReservationResult.Success.class);
                     var success = (TicketReservationResult.Success) result;
-                    assertThat(success.reservedTickets()).hasSize(2);
-                    assertThat(success.reservedTickets().get(0).getOrderId()).isEqualTo(ORDER_ID);
-                    assertThat(success.reservedTickets().get(0).getEventId()).isEqualTo(EVENT_ID);
+                    assertThat(success.reservedTickets()).hasSize(QUANTITY);
+                    success.reservedTickets().forEach(t -> {
+                        assertThat(t.getEventId()).isEqualTo(EVENT_ID);
+                        assertThat(t.getOrderId()).isEqualTo(ORDER_ID);
+                        assertThat(t.getStatus()).isEqualTo(TicketStatus.RESERVED);
+                        assertThat(t.getReservedAt()).isNotNull();
+                        assertThat(t.getReservationExpiresAt()).isNotNull();
+                    });
                 })
                 .verifyComplete();
-
-        ArgumentCaptor<TransactWriteItemsRequest> captor = ArgumentCaptor.forClass(TransactWriteItemsRequest.class);
-        verify(client).transactWriteItems(captor.capture());
-        assertThat(captor.getValue().transactItems()).hasSize(2);
-        assertThat(captor.getValue().transactItems().get(0).update().tableName()).isEqualTo("tickets");
     }
 
     @Test
-    void shouldReturnFailureWithUnavailableTicketIdsWhenConditionFails() {
-        TransactionCanceledException exception = TransactionCanceledException.builder()
-                .cancellationReasons(
-                        CancellationReason.builder().code("None").build(),
-                        CancellationReason.builder().code("ConditionalCheckFailed").build())
-                .build();
+    void shouldBuildTransactionWithOneEventUpdatePlusNTicketPuts() {
         when(client.transactWriteItems(any(TransactWriteItemsRequest.class)))
-                .thenReturn(CompletableFuture.failedFuture(exception));
+                .thenReturn(CompletableFuture.completedFuture(TransactWriteItemsResponse.builder().build()));
 
-        StepVerifier.create(adapter.reserveTickets(EVENT_ID, TICKET_IDS, ORDER_ID))
+        adapter.reserveAndCreateTickets(EVENT_ID, QUANTITY, ORDER_ID).block();
+
+        ArgumentCaptor<TransactWriteItemsRequest> captor = ArgumentCaptor.forClass(TransactWriteItemsRequest.class);
+        verify(client).transactWriteItems(captor.capture());
+
+        var items = captor.getValue().transactItems();
+        // 1 Update on Event + QUANTITY Puts for tickets
+        assertThat(items).hasSize(QUANTITY + 1);
+
+        // First item must be the Event Update (sk=METADATA)
+        var eventUpdate = items.get(0).update();
+        assertThat(eventUpdate).isNotNull();
+        assertThat(eventUpdate.key().get("sk").s()).isEqualTo("METADATA");
+        assertThat(eventUpdate.updateExpression()).contains("availableCount");
+        assertThat(eventUpdate.conditionExpression()).contains("availableCount >= :qty");
+
+        // Remaining items must be ticket Puts
+        for (int i = 1; i <= QUANTITY; i++) {
+            var put = items.get(i).put();
+            assertThat(put).isNotNull();
+            assertThat(put.item().get("pk").s()).isEqualTo(EVENT_ID);
+            assertThat(put.item().get("orderId").s()).isEqualTo(ORDER_ID);
+            assertThat(put.item().get("status").s()).isEqualTo(TicketStatus.RESERVED.name());
+            assertThat(put.item().get("ticketId").s()).isEqualTo(ORDER_ID + "-" + i);
+        }
+    }
+
+    @Test
+    void shouldGenerateTicketIdsAsOrderIdDashIndex() {
+        when(client.transactWriteItems(any(TransactWriteItemsRequest.class)))
+                .thenReturn(CompletableFuture.completedFuture(TransactWriteItemsResponse.builder().build()));
+
+        StepVerifier.create(adapter.reserveAndCreateTickets(EVENT_ID, 2, ORDER_ID))
+                .assertNext(result -> {
+                    var tickets = ((TicketReservationResult.Success) result).reservedTickets();
+                    assertThat(tickets.get(0).getTicketId()).isEqualTo(ORDER_ID + "-1");
+                    assertThat(tickets.get(1).getTicketId()).isEqualTo(ORDER_ID + "-2");
+                })
+                .verifyComplete();
+    }
+
+    @Test
+    void shouldReturnFailureWithReasonWhenTransactionCancelled() {
+        when(client.transactWriteItems(any(TransactWriteItemsRequest.class)))
+                .thenReturn(CompletableFuture.failedFuture(
+                        TransactionCanceledException.builder().message("ConditionalCheckFailed").build()));
+
+        StepVerifier.create(adapter.reserveAndCreateTickets(EVENT_ID, QUANTITY, ORDER_ID))
                 .assertNext(result -> {
                     assertThat(result).isInstanceOf(TicketReservationResult.Failure.class);
-                    var failure = (TicketReservationResult.Failure) result;
-                    assertThat(failure.unavailableTicketIds()).containsExactly("t2");
+                    assertThat(((TicketReservationResult.Failure) result).reason())
+                            .contains("Not enough available tickets");
+                })
+                .verifyComplete();
+    }
+
+    @Test
+    void shouldSetReservationExpiresAtTenMinutesAfterReservedAt() {
+        when(client.transactWriteItems(any(TransactWriteItemsRequest.class)))
+                .thenReturn(CompletableFuture.completedFuture(TransactWriteItemsResponse.builder().build()));
+
+        StepVerifier.create(adapter.reserveAndCreateTickets(EVENT_ID, 1, ORDER_ID))
+                .assertNext(result -> {
+                    var ticket = ((TicketReservationResult.Success) result).reservedTickets().get(0);
+                    long diffSeconds = ticket.getReservationExpiresAt().getEpochSecond()
+                            - ticket.getReservedAt().getEpochSecond();
+                    assertThat(diffSeconds).isEqualTo(600);
                 })
                 .verifyComplete();
     }

@@ -42,6 +42,7 @@ public class EventDynamoDBAdapter implements EventRepository {
         entity.setDate(event.getDate().toString());
         entity.setVenue(event.getVenue());
         entity.setTotalCapacity(event.getTotalCapacity());
+        entity.setAvailableCount(event.getAvailableCount());
         return entity;
     }
 
@@ -52,6 +53,7 @@ public class EventDynamoDBAdapter implements EventRepository {
                 .date(Instant.parse(entity.getDate()))
                 .venue(entity.getVenue())
                 .totalCapacity(entity.getTotalCapacity())
+                .availableCount(entity.getAvailableCount())
                 .build();
     }
 }

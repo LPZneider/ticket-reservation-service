@@ -35,8 +35,8 @@ public class RequestValidator {
             if (request.eventId() == null || request.eventId().isBlank()) {
                 errors.add(buildError(TechnicalMessage.ERROR_BAD_REQUEST, "eventId is required"));
             }
-            if (request.ticketIds() == null || request.ticketIds().isEmpty()) {
-                errors.add(buildError(TechnicalMessage.ERROR_BAD_REQUEST, "ticketIds must not be empty"));
+            if (request.quantity() <= 0) {
+                errors.add(buildError(TechnicalMessage.ERROR_BAD_REQUEST, "quantity must be greater than 0"));
             }
             if (request.userId() == null || request.userId().isBlank()) {
                 errors.add(buildError(TechnicalMessage.ERROR_BAD_REQUEST, "userId is required"));

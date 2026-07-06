@@ -9,7 +9,7 @@ import org.springframework.stereotype.Repository;
 import reactor.core.publisher.Mono;
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
-import software.amazon.awssdk.services.dynamodb.model.CancellationReason;
+import software.amazon.awssdk.services.dynamodb.model.Put;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItemsRequest;
 import software.amazon.awssdk.services.dynamodb.model.TransactionCanceledException;
@@ -20,18 +20,19 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.stream.IntStream;
 
 /**
- * Ticket items share the tickets table with Event metadata: pk=eventId, sk=ticketId
- * (Event metadata uses sk="METADATA" in the same partition). Reservation is a single
- * DynamoDB transaction so that either every requested ticket flips AVAILABLE -> RESERVED
- * or none of them do; per-item ConditionExpression rejects tickets already taken.
+ * Reservation is a single TransactWriteItems:
+ *   - 1 Update on the Event item: availableCount -= quantity (condition: availableCount >= quantity)
+ *   - N Put items for the new RESERVED tickets (pk=eventId, sk=ticketId)
+ * Either everything commits or nothing does — no partial state possible.
  */
 @Repository
 public class TicketDynamoDBAdapter implements TicketRepository {
 
     private static final Duration RESERVATION_TTL = Duration.ofMinutes(10);
-    private static final String CONDITIONAL_CHECK_FAILED = "ConditionalCheckFailed";
 
     private final DynamoDbAsyncClient client;
     private final String ticketsTableName;
@@ -43,68 +44,64 @@ public class TicketDynamoDBAdapter implements TicketRepository {
     }
 
     @Override
-    public Mono<TicketReservationResult> reserveTickets(String eventId, List<String> ticketIds, String orderId) {
+    public Mono<TicketReservationResult> reserveAndCreateTickets(String eventId, int quantity, String orderId) {
         Instant reservedAt = Instant.now();
         Instant expiresAt = reservedAt.plus(RESERVATION_TTL);
-        TransactWriteItemsRequest request = buildRequest(eventId, ticketIds, orderId, reservedAt, expiresAt);
 
-        return Mono.fromFuture(client.transactWriteItems(request))
-                .<TicketReservationResult>map(response ->
-                        new TicketReservationResult.Success(toReservedTickets(eventId, ticketIds, orderId, reservedAt, expiresAt)))
-                .onErrorResume(TransactionCanceledException.class,
-                        ex -> Mono.just(new TicketReservationResult.Failure(unavailableTicketIds(ticketIds, ex))));
-    }
-
-    private TransactWriteItemsRequest buildRequest(String eventId, List<String> ticketIds, String orderId,
-                                                    Instant reservedAt, Instant expiresAt) {
-        List<TransactWriteItem> items = ticketIds.stream()
-                .map(ticketId -> TransactWriteItem.builder()
-                        .update(Update.builder()
-                                .tableName(ticketsTableName)
-                                .key(Map.of(
-                                        "pk", AttributeValue.fromS(eventId),
-                                        "sk", AttributeValue.fromS(ticketId)))
-                                .updateExpression("SET #status = :reserved, orderId = :orderId, "
-                                        + "version = if_not_exists(version, :zero) + :one, "
-                                        + "reservedAt = :reservedAt, reservationExpiresAt = :expiresAt")
-                                .conditionExpression("#status = :available")
-                                .expressionAttributeNames(Map.of("#status", "status"))
-                                .expressionAttributeValues(Map.of(
-                                        ":reserved", AttributeValue.fromS(TicketStatus.RESERVED.name()),
-                                        ":available", AttributeValue.fromS(TicketStatus.AVAILABLE.name()),
-                                        ":orderId", AttributeValue.fromS(orderId),
-                                        ":zero", AttributeValue.fromN("0"),
-                                        ":one", AttributeValue.fromN("1"),
-                                        ":reservedAt", AttributeValue.fromS(reservedAt.toString()),
-                                        ":expiresAt", AttributeValue.fromN(String.valueOf(expiresAt.getEpochSecond()))))
-                                .build())
-                        .build())
-                .toList();
-        return TransactWriteItemsRequest.builder().transactItems(items).build();
-    }
-
-    private List<String> unavailableTicketIds(List<String> ticketIds, TransactionCanceledException ex) {
-        List<String> unavailable = new ArrayList<>();
-        List<CancellationReason> reasons = ex.cancellationReasons();
-        for (int i = 0; i < reasons.size(); i++) {
-            if (CONDITIONAL_CHECK_FAILED.equals(reasons.get(i).code())) {
-                unavailable.add(ticketIds.get(i));
-            }
-        }
-        return unavailable;
-    }
-
-    private List<Ticket> toReservedTickets(String eventId, List<String> ticketIds, String orderId,
-                                            Instant reservedAt, Instant expiresAt) {
-        return ticketIds.stream()
-                .map(ticketId -> Ticket.builder()
-                        .ticketId(ticketId)
+        List<Ticket> tickets = IntStream.rangeClosed(1, quantity)
+                .mapToObj(i -> Ticket.builder()
+                        .ticketId(orderId + "-" + i)
                         .eventId(eventId)
                         .status(TicketStatus.RESERVED)
                         .orderId(orderId)
+                        .version(0)
                         .reservedAt(reservedAt)
                         .reservationExpiresAt(expiresAt)
                         .build())
                 .toList();
+
+        List<TransactWriteItem> items = new ArrayList<>();
+
+        // 1. Decrement availableCount on Event — condition: availableCount >= quantity
+        items.add(TransactWriteItem.builder()
+                .update(Update.builder()
+                        .tableName(ticketsTableName)
+                        .key(Map.of(
+                                "pk", AttributeValue.fromS(eventId),
+                                "sk", AttributeValue.fromS("METADATA")))
+                        .updateExpression("SET availableCount = availableCount - :qty")
+                        .conditionExpression("availableCount >= :qty")
+                        .expressionAttributeValues(Map.of(
+                                ":qty", AttributeValue.fromN(String.valueOf(quantity))))
+                        .build())
+                .build());
+
+        // 2. Put each new RESERVED ticket
+        for (Ticket ticket : tickets) {
+            items.add(TransactWriteItem.builder()
+                    .put(Put.builder()
+                            .tableName(ticketsTableName)
+                            .item(Map.of(
+                                    "pk",                    AttributeValue.fromS(eventId),
+                                    "sk",                    AttributeValue.fromS(ticket.getTicketId()),
+                                    "ticketId",              AttributeValue.fromS(ticket.getTicketId()),
+                                    "eventId",               AttributeValue.fromS(eventId),
+                                    "status",                AttributeValue.fromS(TicketStatus.RESERVED.name()),
+                                    "orderId",               AttributeValue.fromS(orderId),
+                                    "version",               AttributeValue.fromN("0"),
+                                    "reservedAt",            AttributeValue.fromS(reservedAt.toString()),
+                                    "reservationExpiresAt",  AttributeValue.fromN(String.valueOf(expiresAt.getEpochSecond()))))
+                            .build())
+                    .build());
+        }
+
+        TransactWriteItemsRequest request = TransactWriteItemsRequest.builder()
+                .transactItems(items)
+                .build();
+
+        return Mono.fromFuture(client.transactWriteItems(request))
+                .<TicketReservationResult>map(r -> new TicketReservationResult.Success(tickets))
+                .onErrorResume(TransactionCanceledException.class,
+                        ex -> Mono.just(new TicketReservationResult.Failure("Not enough available tickets for event " + eventId)));
     }
 }

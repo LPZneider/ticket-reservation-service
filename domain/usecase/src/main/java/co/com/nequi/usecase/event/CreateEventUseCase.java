@@ -24,6 +24,7 @@ public class CreateEventUseCase {
                 .date(date)
                 .venue(venue)
                 .totalCapacity(totalCapacity)
+                .availableCount(totalCapacity)
                 .build();
         return eventRepository.save(event);
     }

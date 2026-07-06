@@ -17,19 +17,19 @@ management:
       probes:
         enabled: true
 aws:
-  region: ${AWS_REGION}
+  region: ${AWS_REGION:us-east-1}
 adapter:
   dynamodb:
-    tickets-table-name: ${TICKETS_TABLE_NAME}
-    orders-table-name: ${ORDERS_TABLE_NAME}
+    tickets-table-name: ${TICKETS_TABLE_NAME:tickets}
+    orders-table-name: ${ORDERS_TABLE_NAME:orders}
   sqs:
-    region: ${AWS_REGION}
+    region: ${AWS_REGION:us-east-1}
     purchase:
-      queue-url: ${PURCHASE_QUEUE_URL}
-      queue-name: ${PURCHASE_QUEUE_NAME}
+      queue-url: ${PURCHASE_QUEUE_URL:http://localstack:4566/000000000000/purchase-requests}
+      queue-name: ${PURCHASE_QUEUE_NAME:purchase-requests}
     expiry:
-      queue-url: ${EXPIRY_QUEUE_URL}
-      queue-name: ${EXPIRY_QUEUE_NAME}
+      queue-url: ${EXPIRY_QUEUE_URL:http://localstack:4566/000000000000/reservation-expiry}
+      queue-name: ${EXPIRY_QUEUE_NAME:reservation-expiry}
 ---
 spring:
   config:

@@ -21,6 +21,7 @@ public class EventEntity {
     private String date;
     private String venue;
     private int totalCapacity;
+    private int availableCount;
 
     public EventEntity() {
     }
@@ -81,5 +82,13 @@ public class EventEntity {
 
     public void setTotalCapacity(int totalCapacity) {
         this.totalCapacity = totalCapacity;
+    }
+
+    public int getAvailableCount() {
+        return availableCount;
+    }
+
+    public void setAvailableCount(int availableCount) {
+        this.availableCount = availableCount;
     }
 }
