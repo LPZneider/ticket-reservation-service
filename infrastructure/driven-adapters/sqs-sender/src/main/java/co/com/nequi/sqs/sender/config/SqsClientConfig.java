@@ -10,7 +10,6 @@ import software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsPro
 import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.ProfileCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.SystemPropertyCredentialsProvider;
-import software.amazon.awssdk.auth.credentials.WebIdentityTokenFileCredentialsProvider;
 import software.amazon.awssdk.metrics.MetricPublisher;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sqs.SqsAsyncClient;
@@ -41,7 +40,6 @@ public class SqsClientConfig {
         return AwsCredentialsProviderChain.builder()
                 .addCredentialsProvider(EnvironmentVariableCredentialsProvider.create())
                 .addCredentialsProvider(SystemPropertyCredentialsProvider.create())
-                .addCredentialsProvider(WebIdentityTokenFileCredentialsProvider.create())
                 .addCredentialsProvider(ProfileCredentialsProvider.create())
                 .addCredentialsProvider(ContainerCredentialsProvider.builder().build())
                 .addCredentialsProvider(InstanceProfileCredentialsProvider.create())
