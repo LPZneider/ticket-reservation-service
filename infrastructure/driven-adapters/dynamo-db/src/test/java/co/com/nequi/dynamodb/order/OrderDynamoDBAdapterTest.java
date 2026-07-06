@@ -61,4 +61,26 @@ class OrderDynamoDBAdapterTest {
         assertThat(captor.getValue().getOrderStatus()).isEqualTo("PENDING_CONFIRMATION");
         assertThat(captor.getValue().getTicketIds()).containsExactly("t1", "t2");
     }
+
+    @Test
+    void orderEntityGettersAndSettersCoverAllFields() {
+        OrderEntity entity = new OrderEntity();
+        entity.setPk("pk-1");
+        entity.setSk("sk-1");
+        entity.setOrderId("order-1");
+        entity.setEventId("event-1");
+        entity.setTicketIds(List.of("t1"));
+        entity.setUserId("user-1");
+        entity.setOrderStatus("CONFIRMED");
+        entity.setCreatedAt("2026-07-01T10:00:00Z");
+
+        assertThat(entity.getPk()).isEqualTo("pk-1");
+        assertThat(entity.getSk()).isEqualTo("sk-1");
+        assertThat(entity.getOrderId()).isEqualTo("order-1");
+        assertThat(entity.getEventId()).isEqualTo("event-1");
+        assertThat(entity.getTicketIds()).containsExactly("t1");
+        assertThat(entity.getUserId()).isEqualTo("user-1");
+        assertThat(entity.getOrderStatus()).isEqualTo("CONFIRMED");
+        assertThat(entity.getCreatedAt()).isEqualTo("2026-07-01T10:00:00Z");
+    }
 }

@@ -7,60 +7,67 @@ import reactor.test.StepVerifier;
 
 import java.time.Instant;
 import java.util.Collection;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 class RequestValidatorTest {
 
     @Test
-    void createEventPassesWhenValid() {
-        CreateEventRequest request = new CreateEventRequest("Concert", Instant.now(), "Main Arena", 100);
-
-        StepVerifier.create(RequestValidator.validate(request))
+    void createEventPassesWhenAllFieldsValid() {
+        StepVerifier.create(RequestValidator.validate(
+                        new CreateEventRequest("Concert", Instant.now(), "Arena", 100)))
                 .expectNextMatches(Collection::isEmpty)
                 .verifyComplete();
     }
 
     @Test
-    void createEventFailsWhenAllFieldsMissing() {
-        CreateEventRequest request = new CreateEventRequest("", null, "", 100);
-
-        StepVerifier.create(RequestValidator.validate(request))
-                .expectNextMatches(errors -> {
-                    assertThat(errors).hasSize(3);
-                    return true;
-                })
+    void createEventFailsWhenNameAndVenueBlankAndDateNull() {
+        StepVerifier.create(RequestValidator.validate(
+                        new CreateEventRequest("", null, "", 100)))
+                .expectNextMatches(errors -> errors.size() == 3)
                 .verifyComplete();
     }
 
     @Test
-    void reserveTicketPassesWhenValid() {
-        ReserveTicketRequest request = new ReserveTicketRequest("event-1", List.of("t1"), "user-1");
-
-        StepVerifier.create(RequestValidator.validate(request))
+    void reserveTicketPassesWhenQuantityPositive() {
+        StepVerifier.create(RequestValidator.validate(
+                        new ReserveTicketRequest("event-1", 3, "user-1")))
                 .expectNextMatches(Collection::isEmpty)
                 .verifyComplete();
     }
 
     @Test
-    void reserveTicketFailsWhenTicketIdsEmpty() {
-        ReserveTicketRequest request = new ReserveTicketRequest("event-1", List.of(), "user-1");
-
-        StepVerifier.create(RequestValidator.validate(request))
+    void reserveTicketFailsWhenQuantityIsZero() {
+        StepVerifier.create(RequestValidator.validate(
+                        new ReserveTicketRequest("event-1", 0, "user-1")))
                 .expectNextMatches(errors -> {
                     assertThat(errors).hasSize(1);
-                    assertThat(errors.get(0).getMessage()).contains("ticketIds");
+                    assertThat(errors.get(0).getMessage()).contains("quantity");
                     return true;
                 })
                 .verifyComplete();
     }
 
     @Test
-    void reserveTicketFailsWhenAllFieldsMissing() {
-        ReserveTicketRequest request = new ReserveTicketRequest(null, null, null);
+    void reserveTicketFailsWhenQuantityIsNegative() {
+        StepVerifier.create(RequestValidator.validate(
+                        new ReserveTicketRequest("event-1", -1, "user-1")))
+                .expectNextMatches(errors -> errors.size() == 1)
+                .verifyComplete();
+    }
 
-        StepVerifier.create(RequestValidator.validate(request))
+    @Test
+    void reserveTicketFailsWhenEventIdAndUserIdMissing() {
+        StepVerifier.create(RequestValidator.validate(
+                        new ReserveTicketRequest(null, 2, null)))
+                .expectNextMatches(errors -> errors.size() == 2)
+                .verifyComplete();
+    }
+
+    @Test
+    void reserveTicketFailsWhenAllFieldsInvalid() {
+        StepVerifier.create(RequestValidator.validate(
+                        new ReserveTicketRequest(null, 0, null)))
                 .expectNextMatches(errors -> errors.size() == 3)
                 .verifyComplete();
     }

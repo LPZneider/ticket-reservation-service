@@ -2,8 +2,6 @@ package co.com.nequi.model.reservation;
 
 import co.com.nequi.model.order.Order;
 
-import java.util.List;
-
 public sealed interface ReservationResult {
 
     /**
@@ -18,6 +16,6 @@ public sealed interface ReservationResult {
                    boolean reservationExpiryPublished) implements ReservationResult {
     }
 
-    record Failure(List<String> unavailableTicketIds) implements ReservationResult {
+    record Failure(String reason) implements ReservationResult {
     }
 }

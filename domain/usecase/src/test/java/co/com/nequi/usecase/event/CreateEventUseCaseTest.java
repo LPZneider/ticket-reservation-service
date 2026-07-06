@@ -34,9 +34,9 @@ class CreateEventUseCaseTest {
     }
 
     @Test
-    void shouldCreateAndPersistEventWhenCapacityIsPositive() {
+    void shouldCreateEventWithAvailableCountEqualToTotalCapacity() {
         Instant date = Instant.parse("2026-08-01T20:00:00Z");
-        when(eventRepository.save(any(Event.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        when(eventRepository.save(any(Event.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
 
         StepVerifier.create(useCase.create("Concert", date, "Main Arena", 100))
                 .assertNext(event -> {
@@ -45,17 +45,26 @@ class CreateEventUseCaseTest {
                     assertThat(event.getDate()).isEqualTo(date);
                     assertThat(event.getVenue()).isEqualTo("Main Arena");
                     assertThat(event.getTotalCapacity()).isEqualTo(100);
+                    assertThat(event.getAvailableCount()).isEqualTo(100);
                 })
                 .verifyComplete();
+    }
+
+    @Test
+    void shouldPersistEventWithAvailableCountMatchingCapacity() {
+        when(eventRepository.save(any(Event.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
+
+        useCase.create("Concert", Instant.now(), "Arena", 50).block();
 
         ArgumentCaptor<Event> captor = ArgumentCaptor.forClass(Event.class);
         verify(eventRepository).save(captor.capture());
-        assertThat(captor.getValue().getTotalCapacity()).isEqualTo(100);
+        assertThat(captor.getValue().getAvailableCount()).isEqualTo(50);
+        assertThat(captor.getValue().getTotalCapacity()).isEqualTo(50);
     }
 
     @Test
     void shouldFailWithInvalidEventCapacityExceptionWhenCapacityIsZero() {
-        StepVerifier.create(useCase.create("Concert", Instant.now(), "Main Arena", 0))
+        StepVerifier.create(useCase.create("Concert", Instant.now(), "Arena", 0))
                 .expectError(InvalidEventCapacityException.class)
                 .verify();
 
@@ -64,7 +73,7 @@ class CreateEventUseCaseTest {
 
     @Test
     void shouldFailWithInvalidEventCapacityExceptionWhenCapacityIsNegative() {
-        StepVerifier.create(useCase.create("Concert", Instant.now(), "Main Arena", -5))
+        StepVerifier.create(useCase.create("Concert", Instant.now(), "Arena", -5))
                 .expectError(InvalidEventCapacityException.class)
                 .verify();
 
